@@ -145,7 +145,7 @@ class TestBlockedMessageAudit:
 
         leaked_text = "⏰ TIME CHECK: morning\n📊 DYNAMICS: high engagement"
 
-        with pytest.raises(ValueError, match="leak"):
+        with pytest.raises(ValueError, match="leakage detected"):
             orch._require_safe_reply("+1234567890", leaked_text, _regen_attempt=1)
 
         # Check that the audit handler received a record
