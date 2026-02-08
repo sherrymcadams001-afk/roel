@@ -23,6 +23,13 @@ import httpx
 from pathlib import Path
 from typing import Union, Optional
 
+# Keywords indicating non-recoverable LotL errors that should not be retried.
+# Auth failures, CAPTCHAs, and traffic gates require manual operator intervention.
+_NON_RECOVERABLE_KEYWORDS = (
+    "captcha", "verify it's you", "sign in",
+    "unusual traffic", "permission",
+)
+
 
 class LotLClient:
     """
@@ -246,10 +253,7 @@ class LotLClient:
                 if "rate limit" in err_lower or "busy" in err_lower:
                     pass
                 # Non-recoverable: auth failure, CAPTCHA, sign-in gates — fail fast
-                elif any(k in err_lower for k in (
-                    "captcha", "verify it's you", "sign in",
-                    "unusual traffic", "permission",
-                )):
+                elif any(k in err_lower for k in _NON_RECOVERABLE_KEYWORDS):
                     raise
                 else:
                     # Unknown RuntimeError — retry (LotL UI states are unpredictable)

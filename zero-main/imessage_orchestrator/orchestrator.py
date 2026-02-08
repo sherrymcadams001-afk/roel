@@ -1363,10 +1363,15 @@ class Orchestrator:
         except RateLimitError as e:
             raise e 
         except RuntimeError as e:
-            # LLM lock timeout or similar — propagate so the main loop logs it.
-            # The message will be lost (rowid already advanced), but the operator
-            # will see a clear error instead of silent consumption.
-            logger.error(f"[LLM LOCK] Generation failed (message lost): {e}")
+            # LLM lock timeout or similar — propagate so the main loop logs it
+            # and the exception is visible in the orchestrator log.
+            #
+            # NOTE: The inbound message rowid is advanced by the watcher's poll
+            # mechanism, so a lock-timeout here means this specific message will
+            # not receive a reply.  The operator will see the error in the log.
+            # To fully prevent data loss, a future improvement could persist the
+            # message to a retry queue before entering the LLM pipeline.
+            logger.error(f"[LLM LOCK] Generation failed for {handle}: {e}")
             raise
         except Exception as e:
             logger.error(f"Generation failed: {e}")
