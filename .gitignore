@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+*.pid
+*.out
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Chrome user data
+.lotl/
+
+# Orchestrator runtime/local data (do not commit)
+**/imessage_orchestrator/data/**
+!**/imessage_orchestrator/data/.gitkeep
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+
+# Local data
+orchestrator.log
+orchestrator_debug.log
+streamlit.log
+response.json
+desktop-launcher.log
+*.nohup.log
