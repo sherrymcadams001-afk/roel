@@ -187,3 +187,112 @@ class TestProactiveOrdering:
             "_check_proactive_initiation should appear before "
             "time.sleep(POLL_INTERVAL_SECONDS) in the main loop"
         )
+
+
+# ---------------------------------------------------------------------------
+# Module 4: LotL client error classification
+# ---------------------------------------------------------------------------
+
+class TestLotLErrorClassification:
+    """Verify LotLClient fails fast on non-recoverable errors."""
+
+    def test_captcha_error_fails_fast(self) -> None:
+        """CAPTCHA errors should not be retried — fail immediately."""
+        from services.lotl_client import LotLClient
+        import httpx
+
+        client = LotLClient(base_url="http://localhost:9999", timeout=5)
+
+        # Mock httpx.Client to return a "captcha" error on first attempt
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "success": False,
+            "error": "CAPTCHA verification required",
+        }
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mock_response
+
+        with patch("httpx.Client") as MockClient:
+            mock_ctx = MagicMock()
+            mock_ctx.post = mock_post
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+            with pytest.raises(RuntimeError, match="(?i)captcha"):
+                client.chat("test prompt")
+
+        # Should have been called only once (fail-fast, no retries)
+        assert call_count == 1, f"Expected 1 attempt (fail-fast), got {call_count}"
+
+    def test_auth_error_fails_fast(self) -> None:
+        """Sign-in / auth errors should not be retried."""
+        from services.lotl_client import LotLClient
+
+        client = LotLClient(base_url="http://localhost:9999", timeout=5)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "success": False,
+            "error": "verify it's you - sign in required",
+        }
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return mock_response
+
+        with patch("httpx.Client") as MockClient:
+            mock_ctx = MagicMock()
+            mock_ctx.post = mock_post
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+            with pytest.raises(RuntimeError):
+                client.chat("test prompt")
+
+        assert call_count == 1, f"Expected 1 attempt (fail-fast), got {call_count}"
+
+    def test_busy_error_retries(self) -> None:
+        """Busy/rate-limit errors should be retried."""
+        from services.lotl_client import LotLClient
+
+        client = LotLClient(base_url="http://localhost:9999", timeout=5)
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.raise_for_status.return_value = None
+            mock_response.json.return_value = {
+                "success": False,
+                "error": "LotL Server Busy",
+                "busy": True,
+            }
+            return mock_response
+
+        with patch("httpx.Client") as MockClient:
+            mock_ctx = MagicMock()
+            mock_ctx.post = mock_post
+            MockClient.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+            MockClient.return_value.__exit__ = MagicMock(return_value=False)
+
+            with patch("time.sleep"):  # Skip actual delays
+                with pytest.raises(RuntimeError):
+                    client.chat("test prompt")
+
+        # Should have retried all 5 attempts for a busy error
+        assert call_count == 5, f"Expected 5 attempts (retries), got {call_count}"

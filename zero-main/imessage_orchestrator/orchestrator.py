@@ -1362,6 +1362,12 @@ class Orchestrator:
             logger.info(f"[DELEGATE] Generated raw reply (len={len(reply_text)}): {reply_text[:100]}...")
         except RateLimitError as e:
             raise e 
+        except RuntimeError as e:
+            # LLM lock timeout or similar — propagate so the main loop logs it.
+            # The message will be lost (rowid already advanced), but the operator
+            # will see a clear error instead of silent consumption.
+            logger.error(f"[LLM LOCK] Generation failed (message lost): {e}")
+            raise
         except Exception as e:
             logger.error(f"Generation failed: {e}")
             return
