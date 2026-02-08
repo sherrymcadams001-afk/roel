@@ -58,6 +58,17 @@ def _configure_logging() -> None:
         ],
     )
 
+    # Dedicated audit logger for blocked messages (leak detection post-mortem)
+    audit_logger = logging.getLogger("orchestrator.audit")
+    audit_logger.propagate = False  # Don't duplicate to root
+    audit_file = settings.LOG_DIR / "blocked_messages_audit.log"
+    audit_handler = logging.FileHandler(audit_file, encoding="utf-8")
+    audit_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    )
+    audit_logger.addHandler(audit_handler)
+    audit_logger.setLevel(logging.INFO)
+
 class Orchestrator:
     """
     Project Zero: Phase 2 Orchestrator (State Machine Architecture)
@@ -172,8 +183,7 @@ class Orchestrator:
                         modified = True
                 
                 if modified:
-                    with open(profile_path, 'w') as f:
-                        json.dump(profile, f, indent=4)
+                    _atomic_write_json(profile_path, profile, indent=4)
                     cleaned_profiles += 1
                     
             except Exception as e:
@@ -630,6 +640,13 @@ class Orchestrator:
 
         leak_kind = "analyst" if self._contains_analyst_leak(cleaned) else "system_prompt"
         logger.error(f"[BLOCKED] {leak_kind} leak detected in reply for {handle} (len={len(cleaned)})")
+
+        # Audit log: record every blocked message for post-mortem analysis
+        audit = logging.getLogger("orchestrator.audit")
+        audit.warning(
+            "BLOCKED handle=%s leak_kind=%s regen_attempt=%d len=%d text=%s",
+            handle, leak_kind, _regen_attempt, len(cleaned), cleaned[:500],
+        )
 
         # Alert operator
         if settings.OPERATOR_HANDLE:
@@ -1575,10 +1592,11 @@ def _run_main_loop(api_key: str | None, logger: logging.Logger) -> None:
                     cooldown_until = time.time() + exc.retry_after_seconds
                     logger.warning("[RATE_LIMIT] Backing off for %.1fs", exc.retry_after_seconds)
 
-            time.sleep(settings.POLL_INTERVAL_SECONDS)
-            
-            # Check for Proactive Initiations every cycle.
+            # Check for Proactive Initiations every cycle (before sleep,
+            # so proactive checks are not gated by the poll interval).
             bot._check_proactive_initiation()
+
+            time.sleep(settings.POLL_INTERVAL_SECONDS)
 
         except KeyboardInterrupt:
             logger.info("Orchestrator stopped by user.")
