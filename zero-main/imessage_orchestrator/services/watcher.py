@@ -61,7 +61,6 @@ class iMessageWatcher:
         self._state.setdefault("last_message_rowid", 0)
 
     def save_state(self) -> None:
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(self.state_file, self._state)
 
     def _target_handles_clause(self) -> tuple[str, tuple]:

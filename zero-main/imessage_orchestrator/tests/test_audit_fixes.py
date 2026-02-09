@@ -6,7 +6,8 @@ import json
 import logging
 import logging.handlers
 import sys
-import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -92,14 +93,20 @@ class TestWatcherSaveState:
 class TestBlockedMessageAudit:
     """Verify _require_safe_reply writes to the audit logger on leak detection."""
 
-    def _make_orchestrator(self):
-        """Create a minimal Orchestrator with mocked dependencies."""
+    @contextmanager
+    def _make_orchestrator(self, tmp_path: Path):
+        """Create a minimal Orchestrator with mocked dependencies.
+
+        Yields the orchestrator while patches are active so that
+        ``settings`` remains mocked during assertions.
+        """
         with patch("orchestrator.AnalystService"), \
              patch("orchestrator.LotLClient"), \
              patch("orchestrator.SendQueue"), \
              patch("orchestrator.Archivist") as MockArchivist, \
              patch("orchestrator.iMessageBridge") as MockBridge, \
-             patch("orchestrator.WhatsAppBridge"):
+             patch("orchestrator.WhatsAppBridge"), \
+             patch("orchestrator.settings") as mock_settings:
 
             mock_archivist = MockArchivist.return_value
             mock_archivist.load_profile.return_value = {
@@ -107,60 +114,60 @@ class TestBlockedMessageAudit:
                 "pacing_engine": {},
             }
 
+            mock_settings.STATE_FILE = tmp_path / "state.json"
+            mock_settings.SEND_QUEUE_FILE = tmp_path / "send_queue.json"
+            mock_settings.OPERATOR_HANDLE = None
+            mock_settings.LLM_PROVIDER = "lotl"
+            mock_settings.LOTL_BASE_URL = "http://localhost:3000"
+            mock_settings.ENABLE_IMESSAGE = False
+            mock_settings.ENABLE_WHATSAPP = False
+
             from orchestrator import Orchestrator
 
-            # Patch settings to avoid side effects
-            with patch("orchestrator.settings") as mock_settings:
-                mock_settings.STATE_FILE = Path(tempfile.mkdtemp()) / "state.json"
-                mock_settings.SEND_QUEUE_FILE = mock_settings.STATE_FILE.parent / "send_queue.json"
-                mock_settings.OPERATOR_HANDLE = None
-                mock_settings.LLM_PROVIDER = "lotl"
-                mock_settings.LOTL_BASE_URL = "http://localhost:3000"
-                mock_settings.ENABLE_IMESSAGE = False
-                mock_settings.ENABLE_WHATSAPP = False
+            orch = Orchestrator.__new__(Orchestrator)
+            orch.archivist = mock_archivist
+            orch.bridge = MockBridge.return_value
+            orch.bridges = {"iMessage": MockBridge.return_value}
+            orch.delegate = MagicMock()
+            orch._llm_lock = threading.Lock()
+            orch.pending_approvals = {}
+            orch.analyst = MagicMock()
 
-                orch = Orchestrator.__new__(Orchestrator)
-                orch.archivist = mock_archivist
-                orch.bridge = MockBridge.return_value
-                orch.bridges = {"iMessage": MockBridge.return_value}
-                orch.delegate = MagicMock()
-                orch._llm_lock = __import__("threading").Lock()
-                orch.pending_approvals = {}
-                orch.analyst = MagicMock()
+            yield orch
 
-                return orch
-
-    def test_audit_log_on_analyst_leak(self) -> None:
+    def test_audit_log_on_analyst_leak(self, tmp_path: Path) -> None:
         """When _require_safe_reply detects analyst leak, audit logger records it."""
-        orch = self._make_orchestrator()
+        with self._make_orchestrator(tmp_path) as orch:
+            # Set up an audit logger with a handler we can inspect
+            audit_logger = logging.getLogger("orchestrator.audit")
+            audit_logger.handlers.clear()
+            audit_logger.propagate = False
+            handler = logging.handlers.MemoryHandler(capacity=100)
+            audit_logger.addHandler(handler)
+            audit_logger.setLevel(logging.DEBUG)
 
-        # Set up an audit logger with a handler we can inspect
-        audit_logger = logging.getLogger("orchestrator.audit")
-        audit_logger.handlers.clear()
-        audit_logger.propagate = False
-        handler = logging.handlers.MemoryHandler(capacity=100)
-        audit_logger.addHandler(handler)
-        audit_logger.setLevel(logging.DEBUG)
+            leaked_text = "⏰ TIME CHECK: morning\n📊 DYNAMICS: high engagement"
 
-        leaked_text = "⏰ TIME CHECK: morning\n📊 DYNAMICS: high engagement"
+            with pytest.raises(ValueError, match="leakage detected"):
+                orch._require_safe_reply("+1234567890", leaked_text, _regen_attempt=1)
 
-        with pytest.raises(ValueError, match="leakage detected"):
-            orch._require_safe_reply("+1234567890", leaked_text, _regen_attempt=1)
+            # Check that the audit handler received a record
+            handler.flush()
+            assert len(handler.buffer) > 0
+            record = handler.buffer[0]
+            msg = record.getMessage()
+            assert "BLOCKED" in msg
+            assert "+1234567890" in msg
+            # Newlines should be escaped (no raw newlines in the log line)
+            assert "\n" not in msg
 
-        # Check that the audit handler received a record
-        handler.flush()
-        assert len(handler.buffer) > 0
-        record = handler.buffer[0]
-        assert "BLOCKED" in record.getMessage()
-        assert "+1234567890" in record.getMessage()
+            audit_logger.removeHandler(handler)
 
-        audit_logger.removeHandler(handler)
-
-    def test_safe_reply_passes_clean_text(self) -> None:
+    def test_safe_reply_passes_clean_text(self, tmp_path: Path) -> None:
         """Clean text should pass through _require_safe_reply unchanged."""
-        orch = self._make_orchestrator()
-        result = orch._require_safe_reply("+1234567890", "Hey, how's it going?")
-        assert result == "Hey, how's it going?"
+        with self._make_orchestrator(tmp_path) as orch:
+            result = orch._require_safe_reply("+1234567890", "Hey, how's it going?")
+            assert result == "Hey, how's it going?"
 
 
 # ---------------------------------------------------------------------------
@@ -171,20 +178,38 @@ class TestProactiveOrdering:
     """Verify proactive initiation runs before sleep in main loop."""
 
     def test_proactive_before_sleep(self) -> None:
-        """In _run_main_loop source, _check_proactive_initiation must appear before time.sleep."""
+        """_check_proactive_initiation must be called before time.sleep in _run_main_loop."""
+        import ast
         import inspect
         from orchestrator import _run_main_loop
 
         source = inspect.getsource(_run_main_loop)
-        # Find the positions of both calls within the while-loop body
-        proactive_pos = source.find("_check_proactive_initiation()")
-        sleep_pos = source.find("time.sleep(settings.POLL_INTERVAL_SECONDS)")
+        tree = ast.parse(source)
 
-        assert proactive_pos > 0, "_check_proactive_initiation not found in _run_main_loop"
-        assert sleep_pos > 0, "time.sleep not found in _run_main_loop"
-        assert proactive_pos < sleep_pos, (
-            "_check_proactive_initiation should appear before "
-            "time.sleep(POLL_INTERVAL_SECONDS) in the main loop"
+        # Walk the AST to find call positions for the two operations.
+        proactive_line = None
+        sleep_line = None
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # bot._check_proactive_initiation()
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "_check_proactive_initiation":
+                    proactive_line = node.lineno
+                # time.sleep(settings.POLL_INTERVAL_SECONDS)
+                if (isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "sleep"
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "time"
+                        and node.args
+                        and isinstance(node.args[0], ast.Attribute)
+                        and node.args[0].attr == "POLL_INTERVAL_SECONDS"):
+                    sleep_line = node.lineno
+
+        assert proactive_line is not None, "_check_proactive_initiation not found in AST"
+        assert sleep_line is not None, "time.sleep(settings.POLL_INTERVAL_SECONDS) not found in AST"
+        assert proactive_line < sleep_line, (
+            f"_check_proactive_initiation (line {proactive_line}) should appear before "
+            f"time.sleep(POLL_INTERVAL_SECONDS) (line {sleep_line}) in the main loop"
         )
 
 
@@ -198,7 +223,6 @@ class TestLotLErrorClassification:
     def test_captcha_error_fails_fast(self) -> None:
         """CAPTCHA errors should not be retried — fail immediately."""
         from services.lotl_client import LotLClient
-        import httpx
 
         client = LotLClient(base_url="http://localhost:9999", timeout=5)
 

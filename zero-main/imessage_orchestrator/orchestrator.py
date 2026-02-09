@@ -45,29 +45,31 @@ def _configure_logging() -> None:
     settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
     
     root_logger = logging.getLogger()
-    if any(isinstance(h, logging.FileHandler) for h in root_logger.handlers):
-        return
+    if not any(isinstance(h, logging.FileHandler) for h in root_logger.handlers):
+        level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            handlers=[
+                logging.FileHandler(settings.LOG_FILE, encoding="utf-8"),
+                logging.StreamHandler(),
+            ],
+        )
 
-    level = getattr(logging, settings.LOG_LEVEL, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(settings.LOG_FILE, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-    )
-
-    # Dedicated audit logger for blocked messages (leak detection post-mortem)
+    # Dedicated audit logger for blocked messages (leak detection post-mortem).
+    # Always ensure this handler is installed, even if root logging was
+    # preconfigured by the caller, and guard against duplicate handlers
+    # on repeated calls.
     audit_logger = logging.getLogger("orchestrator.audit")
-    audit_logger.propagate = False  # Don't duplicate to root
-    audit_file = settings.LOG_DIR / "blocked_messages_audit.log"
-    audit_handler = logging.FileHandler(audit_file, encoding="utf-8")
-    audit_handler.setFormatter(
-        logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    )
-    audit_logger.addHandler(audit_handler)
-    audit_logger.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.FileHandler) for h in audit_logger.handlers):
+        audit_logger.propagate = False  # Don't duplicate to root
+        audit_file = settings.LOG_DIR / "blocked_messages_audit.log"
+        audit_handler = logging.FileHandler(audit_file, encoding="utf-8")
+        audit_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        )
+        audit_logger.addHandler(audit_handler)
+        audit_logger.setLevel(logging.INFO)
 
 class Orchestrator:
     """
@@ -641,11 +643,14 @@ class Orchestrator:
         leak_kind = "analyst" if self._contains_analyst_leak(cleaned) else "system_prompt"
         logger.error(f"[BLOCKED] {leak_kind} leak detected in reply for {handle} (len={len(cleaned)})")
 
-        # Audit log: record every blocked message for post-mortem analysis
+        # Audit log: record every blocked message for post-mortem analysis.
+        # Newlines are escaped to keep each audit entry on a single line and
+        # prevent log-injection attacks.
         audit = logging.getLogger("orchestrator.audit")
+        sanitized = cleaned[:500].replace("\n", "\\n").replace("\r", "\\r")
         audit.warning(
             "BLOCKED handle=%s leak_kind=%s regen_attempt=%d len=%d text=%s",
-            handle, leak_kind, _regen_attempt, len(cleaned), cleaned[:500],
+            handle, leak_kind, _regen_attempt, len(cleaned), sanitized,
         )
 
         # Alert operator
