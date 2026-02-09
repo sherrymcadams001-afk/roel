@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from config import settings
+from utils.atomic import atomic_write_json
 from utils.db_client import connect_readonly, fetch_all
 from .interfaces import IncomingMessage
 
@@ -60,10 +61,7 @@ class iMessageWatcher:
         self._state.setdefault("last_message_rowid", 0)
 
     def save_state(self) -> None:
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._state, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.state_file)
+        atomic_write_json(self.state_file, self._state)
 
     def _target_handles_clause(self) -> tuple[str, tuple]:
         if self.target_handles is None:

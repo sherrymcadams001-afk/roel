@@ -23,6 +23,13 @@ import httpx
 from pathlib import Path
 from typing import Union, Optional
 
+# Keywords indicating non-recoverable LotL errors that should not be retried.
+# Auth failures, CAPTCHAs, and traffic gates require manual operator intervention.
+_NON_RECOVERABLE_KEYWORDS = (
+    "captcha", "verify it's you", "sign in",
+    "unusual traffic", "permission",
+)
+
 
 class LotLClient:
     """
@@ -240,19 +247,21 @@ class LotLClient:
                 pass
                 
             except RuntimeError as e:
-                # check if error allows retry
                 last_error = e
-                if "rate limit" in str(e).lower() or "busy" in str(e).lower():
-                    pass # Retry
+                err_lower = str(e).lower()
+                # Recoverable: transient server/UI issues — retry with backoff
+                if "rate limit" in err_lower or "busy" in err_lower:
+                    pass
+                # Non-recoverable: auth failure, CAPTCHA, sign-in gates — fail fast
+                elif any(k in err_lower for k in _NON_RECOVERABLE_KEYWORDS):
+                    raise
                 else:
-                    # Logic error or non-recoverable
-                    # But actually, often LotL errors are weird UI states, so retrying MIGHT help.
-                    # Let's retry on almost everything for "ensure requests always get sent"
+                    # Unknown RuntimeError — retry (LotL UI states are unpredictable)
                     pass
 
             except Exception as e:
                 last_error = e
-                # Unexpected error
+                # Unexpected error — retry
                 pass
             
             # Backoff before next attempt
